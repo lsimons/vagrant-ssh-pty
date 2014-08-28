@@ -34,11 +34,12 @@ module VagrantPlugins
         @connection = nil
         @inserted_key = false
         ### start monkey-patch
-        @ps1          = '>>>>> '
-        @ps2          = '..... '
-        @ps1_export   = "export PS1='#{@ps1}'\n"
-        @ps2_export   = "export PS2='#{@ps2}'\n"
-        @term_export  = "export TERM=vt100\n"
+        @ps1            = '>>>>>>>>>> '
+        @ps2            = '.......... '
+        @ps1_export     = "export PS1='#{@ps1}'\n"
+        @ps2_export     = "export PS2='#{@ps2}'\n"
+        @prompt_command = "export PROMPT_COMMAND=\n"
+        @term_export    = "export TERM=vt100\n"
         ### end monkey-patch
       end
 
@@ -178,50 +179,55 @@ module VagrantPlugins
           return stdout
         end
         lines = ''
-        stripped_ps1_export = false
-        stripped_ps2_export = false
-        stripped_term_export = false
-        stripped_exit = false
-        stripped_logout = false
-        stripped_command = false
         stdout.each_line do |line|
+          # @logger.debug("line:: #{line}")
+          # codes = ''
+          # line.bytes.each { |b|
+          #   codes << String(b)
+          #   codes << ' '
+          # }
+          # @logger.debug("codes: #{codes}")
+
+          # filter out lines that set the terminal title or start
+          #   with other escape sequences we did not filter yet
           esc = 27
-          next if line.start_with? esc.chr
-          unless stripped_ps1_export
-            if strip(line) == strip(@ps1_export)
-              stripped_ps1_export = true
-              next
-            end
+          escape_sequence_one = esc.chr + "["
+          escape_sequence_two = esc.chr + "]"
+          next if line.start_with? escape_sequence_one
+          next if line.start_with? escape_sequence_two
+
+          stripped = strip(line)
+
+          # filter out lines that we sent
+          next if stripped.end_with? strip(@ps1_export)
+          next if stripped.end_with? strip(@ps2_export)
+          next if stripped.end_with? strip(@prompt_command)
+          next if stripped.end_with? strip(@term_export)
+          next if stripped == @ps1 + "exit"
+
+          # filter out the echo of the command we sent
+          next if stripped.end_with? strip(command)
+
+          # filter out output from calling exit
+          next if stripped == "logout"
+
+          # strip remaining prefixes if they occur
+          if line.start_with? @ps1
+            line = line[@ps1.size..(line.size-1)]
           end
-          unless stripped_ps2_export
-            if strip(line) == strip(@ps2_export)
-              stripped_ps2_export = true
-              next
-            end
+          if line.start_with? @ps2
+            line = line[@ps2.size..(line.size-1)]
           end
-          unless stripped_term_export
-            if strip(line) == strip(@term_export)
-              stripped_term_export = true
-              next
-            end
+
+          # strip prefixes if they occur at the end of a line
+          # which can happen when executing commands whose
+          # output doesn't have a newline at the end
+          # (i.e. printf)
+          if line.end_with? @ps1
+            line = line[0,line.size-@ps1.size]
           end
-          unless stripped_exit
-            if strip(line) == "exit"
-              stripped_exit = true
-              next
-            end
-          end
-          unless stripped_logout
-            if strip(line) == "logout"
-              stripped_logout = true
-              next
-            end
-          end
-          unless stripped_command
-            if strip(line) == strip(command)
-              stripped_command = true
-              next
-            end
+          if line.end_with? @ps2
+            line = line[0,line.size-@ps2.size]
           end
 
           lines << line
@@ -526,7 +532,7 @@ module VagrantPlugins
           ch.exec(shell_cmd) do |ch2, _|
             # Setup the channel callbacks so we can get data and exit status
             ch2.on_data do |ch3, data|
-              # Filter out the clear screen command
+              # filter out the clear screen command
               data = remove_ansi_escape_codes(data)
               @logger.debug("stdout: #{data.strip}")
               yield :stdout, data if block_given?
@@ -549,14 +555,16 @@ module VagrantPlugins
             end
 
             ### start monkey-patch
+
+            # Set the terminal
+            ch2.send_data @term_export
+
             # Allow identifying actual output vs echo of stdin
             if @machine.config.ssh.pty
               ch2.send_data @ps1_export
               ch2.send_data @ps2_export
+              ch2.send_data @prompt_command
             end
-
-            # Set the terminal
-            ch2.send_data @term_export
             ### end monkey-patch
 
             # Set SSH_AUTH_SOCK if we are in sudo and forwarding agent.
@@ -583,6 +591,9 @@ module VagrantPlugins
                 ch2.send_data "export SSH_AUTH_SOCK=#{auth_socket}\n"
               end
             end
+
+            # wait just a little to give shell time to apply our settings
+            sleep(0.1)
 
             # Output the command
             ch2.send_data "#{command}\n".force_encoding('ASCII-8BIT')

@@ -49,6 +49,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.ssh.pty = true
 
   config.vm.provision :shell, inline: <<-EOF
+    set -x
     echo "PROVISIONED"
   EOF
 
