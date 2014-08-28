@@ -1,0 +1,26 @@
+$ ./test.sh 
+Creating VM
+Bringing machine 'default' up with 'virtualbox' provider...
+==> default: Checking if box 'chef/centos-6.5' is up to date...
+==> default: VirtualBox VM is already running.
+---------------------------------------------------------------
+Showing all the extra cruft that you normally get with pty=true
+---------------------------------------------------------------
+==> default: Running provisioner: shell...
+    default: Running: inline script
+==> default: export TERM=vt100
+==> default: chmod +x /tmp/vagrant-shell && /tmp/vagrant-shell
+==> default: exit
+==> default: [root@vagrant-ssh-pty vagrant]# export TERM=vt100
+==> default: [root@vagrant-ssh-pty vagrant]# chmod +x /tmp/vagrant-shell && /tmp/vagrant-sh
+l=> default: el 
+==> default: PROVISIONED
+==> default: [root@vagrant-ssh-pty vagrant]# exit
+==> default: logout
+---------------------------------------------------------------
+Showing how the patch suppresses all the extra output
+---------------------------------------------------------------
+==> default: Running provisioner: shell...
+    default: Running: inline script
+==> default: PROVISIONED
+$
