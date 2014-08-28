@@ -33,14 +33,6 @@ module VagrantPlugins
         @logger  = Log4r::Logger.new("vagrant::communication::ssh")
         @connection = nil
         @inserted_key = false
-        ### start monkey-patch
-        @ps1            = '>>>>>>>>>> '
-        @ps2            = '.......... '
-        @ps1_export     = "export PS1='#{@ps1}'\n"
-        @ps2_export     = "export PS2='#{@ps2}'\n"
-        @prompt_command = "export PROMPT_COMMAND=\n"
-        @term_export    = "export TERM=vt100\n"
-        ### end monkey-patch
       end
 
       def wait_for_ready(timeout)
@@ -168,74 +160,6 @@ module VagrantPlugins
         true
       end
 
-      ### start monkey-patch
-      def strip(str)
-        # http://stackoverflow.com/questions/20305966/why-does-strip-not-remove-the-leading-whitespace
-        str.gsub(/\A\p{Space}*|\p{Space}*\z/, '')
-      end
-
-      def scrub_shell_echo(stdout, command)
-        unless @machine.config.ssh.pty
-          return stdout
-        end
-        lines = ''
-        stdout.each_line do |line|
-          # @logger.debug("line:: #{line}")
-          # codes = ''
-          # line.bytes.each { |b|
-          #   codes << String(b)
-          #   codes << ' '
-          # }
-          # @logger.debug("codes: #{codes}")
-
-          # filter out lines that set the terminal title or start
-          #   with other escape sequences we did not filter yet
-          esc = 27
-          escape_sequence_one = esc.chr + "["
-          escape_sequence_two = esc.chr + "]"
-          next if line.start_with? escape_sequence_one
-          next if line.start_with? escape_sequence_two
-
-          stripped = strip(line)
-
-          # filter out lines that we sent
-          next if stripped.end_with? strip(@ps1_export)
-          next if stripped.end_with? strip(@ps2_export)
-          next if stripped.end_with? strip(@prompt_command)
-          next if stripped.end_with? strip(@term_export)
-          next if stripped == @ps1 + "exit"
-
-          # filter out the echo of the command we sent
-          next if stripped.end_with? strip(command)
-
-          # filter out output from calling exit
-          next if stripped == "logout"
-
-          # strip remaining prefixes if they occur
-          if line.start_with? @ps1
-            line = line[@ps1.size..(line.size-1)]
-          end
-          if line.start_with? @ps2
-            line = line[@ps2.size..(line.size-1)]
-          end
-
-          # strip prefixes if they occur at the end of a line
-          # which can happen when executing commands whose
-          # output doesn't have a newline at the end
-          # (i.e. printf)
-          if line.end_with? @ps1
-            line = line[0,line.size-@ps1.size]
-          end
-          if line.end_with? @ps2
-            line = line[0,line.size-@ps2.size]
-          end
-
-          lines << line
-        end
-        lines
-      end
-      ### end monkey-patch
-
       def execute(command, opts=nil, &block)
         opts = {
           error_check: true,
@@ -265,20 +189,9 @@ module VagrantPlugins
               stderr += data
             end
 
-            ### start monkey-patch
-            # block.call(type, data) if block
-            ### end monkey-patch
+            block.call(type, data) if block
           end
         end
-
-        ### start monkey-patch
-        stdout = scrub_shell_echo(stdout, command)
-        @logger.debug("ssh.execute.stdout: #{stdout}")
-        @logger.debug("ssh.execute.stderr: #{stderr}")
-
-        block.call(:stdout, stdout) if block
-        block.call(:stderr, stderr) if block
-        ### end monkey-patch
 
         # Check for any errors
         if opts[:error_check] && !opts[:good_exit].include?(exit_status)
@@ -341,7 +254,7 @@ module VagrantPlugins
           to: to.to_s
       end
 
-      #protected
+      protected
 
       # Opens an SSH connection and yields it to a block.
       def connect(**opts)
@@ -372,10 +285,7 @@ module VagrantPlugins
         raise Vagrant::Errors::SSHNotReady if ssh_info.nil?
 
         # Default some options
-        ### start monkey-patch
-        # opts[:retries] = 5 if !opts.has_key?(:retries)
         opts[:retries] = 500 if !opts.has_key?(:retries)
-        ### end monkey-patch
 
         # Build the options we'll use to initiate the connection via Net::SSH
         common_connect_opts = {
@@ -416,7 +326,7 @@ module VagrantPlugins
 
           timeout = 60
 
-          @logger.info("Attempting SSH connnection...")
+          @logger.info("Attempting SSH connection...")
           connection = retryable(tries: opts[:retries], on: exceptions) do
             Timeout.timeout(timeout) do
               begin
@@ -491,6 +401,9 @@ module VagrantPlugins
         return yield connection if block_given?
       end
 
+      DELIM_START = 'UniqueStartStringPTY'
+      DELIM_END = 'UniqueEndStringPTY'
+
       # Executes the command on an SSH connection within a login shell.
       def shell_execute(connection, command, **opts)
         opts = {
@@ -499,12 +412,6 @@ module VagrantPlugins
         }.merge(opts)
 
         sudo  = opts[:sudo]
-        ### begin monkey-patch
-        if sudo and @machine.ssh_info[:username] == 'root'
-          @logger.info("Execute: running as root so not invoking sudo")
-          sudo = false
-        end
-        ### end monkey-patch
         shell = opts[:shell]
 
         @logger.info("Execute: #{command} (sudo=#{sudo.inspect})")
@@ -517,10 +424,14 @@ module VagrantPlugins
         shell_cmd = shell if shell
         shell_cmd = "sudo -E -H #{shell_cmd}" if sudo
 
+        use_tty = false
+        stdout = ''
+
         # Open the channel so we can execute or command
         channel = connection.open_channel do |ch|
           if @machine.config.ssh.pty
             ch.request_pty do |ch2, success|
+              use_tty = success and command != ''
               if success
                 @logger.debug("pty obtained for connection")
               else
@@ -532,16 +443,20 @@ module VagrantPlugins
           ch.exec(shell_cmd) do |ch2, _|
             # Setup the channel callbacks so we can get data and exit status
             ch2.on_data do |ch3, data|
-              # filter out the clear screen command
+              # Filter out the clear screen command
               data = remove_ansi_escape_codes(data)
-              @logger.debug("stdout: #{data.strip}")
-              yield :stdout, data if block_given?
+              @logger.debug("stdout: #{data}")
+              if use_tty
+                stdout << data
+              else
+                yield :stdout, data if block_given?
+              end
             end
 
             ch2.on_extended_data do |ch3, type, data|
               # Filter out the clear screen command
               data = remove_ansi_escape_codes(data)
-              @logger.debug("stderr: #{data.strip}")
+              @logger.debug("stderr: #{data}")
               yield :stderr, data if block_given?
             end
 
@@ -554,18 +469,8 @@ module VagrantPlugins
               channel.close
             end
 
-            ### start monkey-patch
-
             # Set the terminal
-            ch2.send_data @term_export
-
-            # Allow identifying actual output vs echo of stdin
-            if @machine.config.ssh.pty
-              ch2.send_data @ps1_export
-              ch2.send_data @ps2_export
-              ch2.send_data @prompt_command
-            end
-            ### end monkey-patch
+            ch2.send_data "export TERM=vt100\n"
 
             # Set SSH_AUTH_SOCK if we are in sudo and forwarding agent.
             # This is to work around often misconfigured boxes where
@@ -592,25 +497,30 @@ module VagrantPlugins
               end
             end
 
-            # wait just a little to give shell time to apply our settings
-            sleep(0.1)
-
             # Output the command
-            ch2.send_data "#{command}\n".force_encoding('ASCII-8BIT')
+            if use_tty
+              ch2.send_data "stty raw -echo\n"
+              ch2.send_data "export PS1=\n"
+              ch2.send_data "export PS2=\n"
+              ch2.send_data "export PROMPT_COMMAND=\n"
+              sleep(0.1)
+              data = "printf #{DELIM_START}\n"
+              data += "#{command}\n"
+              data += "printf #{DELIM_END}\n"
+              data = data.force_encoding('ASCII-8BIT')
+              ch2.send_data data
+            else
+              ch2.send_data "#{command}\n".force_encoding('ASCII-8BIT')
+            end
 
             # Remember to exit or this channel will hang open
             ch2.send_data "exit\n"
 
             # Send eof to let server know we're done
             ch2.eof!
-
-            ### start monkey-patch
             ch2.wait
-            ### end monkey-patch
           end
-          ### start monkey-patch
           ch.wait
-          ### end monkey-patch
         end
 
         begin
@@ -633,12 +543,28 @@ module VagrantPlugins
           begin
             channel.wait
           rescue Errno::ECONNRESET, IOError
-            @logger.info("SSH connection unexpected closed. Assuming reboot or something.")
+            @logger.info(
+              "SSH connection unexpected closed. Assuming reboot or something.")
             exit_status = 0
+          rescue Net::SSH::ChannelOpenFailed
+            raise Vagrant::Errors::SSHChannelOpenFail
+          rescue Net::SSH::Disconnect
+            raise Vagrant::Errors::SSHDisconnected
           end
         ensure
           # Kill the keep-alive thread
           keep_alive.kill if keep_alive
+        end
+
+        if use_tty
+          @logger.debug("stdout: #{stdout}")
+          if not stdout.include? DELIM_START or not stdout.include? DELIM_END
+            @logger.error("Error parsing TTY output")
+            raise Vagrant::Errors::SSHInvalidShell.new
+          end
+          data = stdout[/.*#{DELIM_START}(.*?)#{DELIM_END}/m, 1]
+          @logger.debug("selected stdout: #{data}")
+          yield :stdout, data if block_given?
         end
 
         # Return the final exit status
